@@ -14,7 +14,7 @@ if not TOKEN:
 
 bot = telebot.TeleBot(TOKEN)
 
-# Store user states (simple in-memory dict)
+# Store user states
 user_states = {}
 
 # ========== TOOL FUNCTIONS ==========
@@ -129,7 +129,7 @@ def handle_text(message):
 def home():
     return "🤖 Bot is running! Webhook is ready."
 
-@app.route(f'/{TOKEN}', methods=['POST'])
+@app.route('/webhook', methods=['POST'])
 def webhook():
     """Handle incoming Telegram updates."""
     json_data = request.get_json(force=True)
@@ -144,7 +144,7 @@ def set_webhook():
     if not render_host:
         return "❌ RENDER_EXTERNAL_HOSTNAME not found. Make sure you are on Render.", 500
     
-    webhook_url = f"https://{render_host}/{TOKEN}"
+    webhook_url = f"https://{render_host}/webhook"
     try:
         bot.set_webhook(url=webhook_url)
         return f"✅ Webhook set successfully to: {webhook_url}"
@@ -158,7 +158,7 @@ if __name__ == "__main__":
     # Auto-set webhook on Render
     if os.environ.get('RENDER_EXTERNAL_HOSTNAME'):
         render_host = os.environ['RENDER_EXTERNAL_HOSTNAME']
-        webhook_url = f"https://{render_host}/{TOKEN}"
+        webhook_url = f"https://{render_host}/webhook"
         try:
             bot.set_webhook(url=webhook_url)
             print(f"✅ Webhook auto-set to: {webhook_url}")

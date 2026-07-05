@@ -1,12 +1,10 @@
 import os
 import re
-import asyncio
-from datetime import datetime, timedelta  # ✅ Correct import - NO "import timedelta" line
+from datetime import datetime, timedelta
 from flask import Flask, request
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import telebot
+import yt_dlp
 
-# ========== FLASK APP ==========
 app = Flask(__name__)
 
 # ========== BOT SETUP ==========
@@ -14,8 +12,10 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
 
-# Build the bot application
-application = Application.builder().token(TOKEN).build()
+bot = telebot.TeleBot(TOKEN)
+
+# Store user states (simple in-memory dict)
+user_states = {}
 
 # ========== TOOL FUNCTIONS ==========
 def calculate_age(birth_date_str):
@@ -38,8 +38,7 @@ def calculate_age(birth_date_str):
     except ValueError:
         return None
 
-async def download_video(url):
-    import yt_dlp
+def download_video(url):
     ydl_opts = {
         'format': 'best[height<=720]',
         'outtmpl': 'downloads/%(title)s.%(ext)s',
@@ -55,8 +54,9 @@ async def download_video(url):
         print(f"Download error: {e}")
         return None
 
-# ========== COMMAND HANDLERS ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========== BOT COMMAND HANDLERS ==========
+@bot.message_handler(commands=['start'])
+def start(message):
     welcome = (
         "🤖 **Welcome to Multi-Tool Bot!**\n\n"
         "Here's what I can do:\n"
@@ -64,51 +64,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Send any video URL - Download videos\n\n"
         "Just send me a YouTube/Instagram/TikTok link!"
     )
-    await update.message.reply_text(welcome, parse_mode="Markdown")
+    bot.reply_to(message, welcome, parse_mode="Markdown")
 
-async def age_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📅 Please send your birthdate in this format:\n`YYYY-MM-DD`\n\nExample: `2000-01-15`",
-        parse_mode="Markdown"
-    )
-    context.user_data['waiting_for_age'] = True
-
-async def handle_age_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('waiting_for_age'):
-        return
-    user_input = update.message.text.strip()
-    result = calculate_age(user_input)
-    if result:
-        await update.message.reply_text(result, parse_mode="Markdown")
-        context.user_data['waiting_for_age'] = False
-    else:
-        await update.message.reply_text(
-            "❌ Invalid format! Please use:\n`YYYY-MM-DD`",
-            parse_mode="Markdown"
-        )
-
-async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('waiting_for_age'):
-        return
-    url = update.message.text.strip()
-    if not re.match(r'https?://[^\s]+', url):
-        return
-    
-    await update.message.reply_text("⏳ Downloading video... Please wait.")
-    os.makedirs('downloads', exist_ok=True)
-    
-    filename = await download_video(url)
-    if filename and os.path.exists(filename):
-        try:
-            with open(filename, 'rb') as f:
-                await update.message.reply_video(video=f, caption="✅ Download complete!")
-            os.remove(filename)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error sending video: {str(e)}")
-    else:
-        await update.message.reply_text("❌ Could not download video. Make sure the link is valid.")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@bot.message_handler(commands=['help'])
+def help_command(message):
     help_text = (
         "📖 **Available Commands:**\n\n"
         "/start - Show welcome message\n"
@@ -116,45 +75,78 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - Show this help\n\n"
         "📹 **Video Downloader:**\nJust paste any video URL."
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    bot.reply_to(message, help_text, parse_mode="Markdown")
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"Error: {context.error}")
+@bot.message_handler(commands=['age'])
+def age_command(message):
+    bot.reply_to(
+        message,
+        "📅 Please send your birthdate in this format:\n`YYYY-MM-DD`\n\nExample: `2000-01-15`",
+        parse_mode="Markdown"
+    )
+    user_states[message.chat.id] = 'waiting_for_age'
 
-# Register all handlers
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_command))
-application.add_handler(CommandHandler("age", age_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_age_input))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video_url))
-application.add_error_handler(error_handler)
+@bot.message_handler(func=lambda message: True, content_types=['text'])
+def handle_text(message):
+    chat_id = message.chat.id
+    text = message.text.strip()
+    
+    # Check if user is in age calculator mode
+    if user_states.get(chat_id) == 'waiting_for_age':
+        result = calculate_age(text)
+        if result:
+            bot.reply_to(message, result, parse_mode="Markdown")
+            user_states[chat_id] = None
+        else:
+            bot.reply_to(
+                message,
+                "❌ Invalid format! Please use:\n`YYYY-MM-DD`",
+                parse_mode="Markdown"
+            )
+        return
+    
+    # Check if it's a video URL
+    if re.match(r'https?://[^\s]+', text):
+        bot.reply_to(message, "⏳ Downloading video... Please wait.")
+        os.makedirs('downloads', exist_ok=True)
+        
+        filename = download_video(text)
+        if filename and os.path.exists(filename):
+            try:
+                with open(filename, 'rb') as f:
+                    bot.send_video(chat_id, f, caption="✅ Download complete!")
+                os.remove(filename)
+            except Exception as e:
+                bot.reply_to(message, f"❌ Error sending video: {str(e)}")
+        else:
+            bot.reply_to(message, "❌ Could not download video. Make sure the link is valid.")
+    else:
+        # Ignore other messages
+        pass
 
 # ========== FLASK ROUTES ==========
 @app.route('/')
 def home():
     return "🤖 Bot is running! Webhook is ready."
 
-@app.route('/webhook', methods=['POST'])
+@app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
-    """Handle incoming Telegram messages via Webhook."""
-    try:
-        json_data = request.get_json(force=True)
-        update = Update.de_json(json_data, application.bot)
-        asyncio.run(application.process_update(update))
-    except Exception as e:
-        print(f"Webhook error: {e}")
+    """Handle incoming Telegram updates."""
+    json_data = request.get_json(force=True)
+    update = telebot.types.Update.de_json(json_data)
+    bot.process_new_updates([update])
     return "OK", 200
 
 @app.route('/set_webhook')
 def set_webhook():
-    """Manually set the webhook URL."""
+    """Set the webhook URL."""
     render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
     if not render_host:
         return "❌ RENDER_EXTERNAL_HOSTNAME not found. Make sure you are on Render.", 500
     
-    webhook_url = f"https://{render_host}/webhook"
+    webhook_url = f"https://{render_host}/{TOKEN}"
     try:
-        asyncio.run(application.bot.set_webhook(webhook_url))
+        bot.set_webhook(url=webhook_url)
         return f"✅ Webhook set successfully to: {webhook_url}"
     except Exception as e:
         return f"❌ Failed to set webhook: {e}", 500
@@ -166,9 +158,9 @@ if __name__ == "__main__":
     # Auto-set webhook on Render
     if os.environ.get('RENDER_EXTERNAL_HOSTNAME'):
         render_host = os.environ['RENDER_EXTERNAL_HOSTNAME']
-        webhook_url = f"https://{render_host}/webhook"
+        webhook_url = f"https://{render_host}/{TOKEN}"
         try:
-            asyncio.run(application.bot.set_webhook(webhook_url))
+            bot.set_webhook(url=webhook_url)
             print(f"✅ Webhook auto-set to: {webhook_url}")
         except Exception as e:
             print(f"❌ Could not auto-set webhook: {e}")

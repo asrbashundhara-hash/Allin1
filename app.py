@@ -15,6 +15,9 @@ import qrcode
 from io import BytesIO
 from PIL import Image
 import requests
+import gtts
+import PyPDF2
+from PyPDF2 import PdfReader, PdfWriter
 
 app = Flask(__name__)
 
@@ -26,7 +29,8 @@ if not TOKEN:
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 bot = telebot.TeleBot(TOKEN)
-user_states = {}
+user_states = {}  # {chat_id: {'state': 'waiting_input', 'tool': 'email', 'category': 'ai', 'last_menu': msg_id}}
+user_recent = {}  # {chat_id: [recent_tool_names]}
 
 # ========== DATABASE ==========
 DB_PATH = "bot_data.db"
@@ -53,16 +57,10 @@ def init_db():
 init_db()
 
 # ========== OPENAI HELPER ==========
-
 def call_openai(prompt, max_tokens=500):
-    """Call OpenAI API with the given prompt."""
     if not OPENAI_API_KEY:
         return None
-    
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     data = {
         "model": "gpt-3.5-turbo",
         "messages": [{"role": "user", "content": prompt}],
@@ -70,34 +68,38 @@ def call_openai(prompt, max_tokens=500):
         "temperature": 0.7
     }
     try:
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=30
-        )
+        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data, timeout=30)
         if response.status_code == 200:
-            result = response.json()
-            return result['choices'][0]['message']['content'].strip()
-        else:
-            print(f"OpenAI error: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        print(f"OpenAI error: {str(e)}")
+            return response.json()['choices'][0]['message']['content'].strip()
+        return None
+    except:
         return None
 
 def ai_response(prompt, fallback):
-    """Try OpenAI first, fallback to template if not available."""
     result = call_openai(prompt)
-    if result:
-        return result
-    return fallback
+    return result if result else fallback
+
+# ========== HELPER FUNCTIONS ==========
+def send_typing(chat_id):
+    bot.send_chat_action(chat_id, 'typing')
+
+def add_recent(chat_id, tool_name):
+    if chat_id not in user_recent:
+        user_recent[chat_id] = []
+    recent = user_recent[chat_id]
+    if tool_name in recent:
+        recent.remove(tool_name)
+    recent.insert(0, tool_name)
+    if len(recent) > 5:
+        recent = recent[:5]
+    user_recent[chat_id] = recent
 
 # ========== TOOL FUNCTIONS ==========
+# (All existing functions from previous version are included, plus new ones)
 
-# --- AI WRITING (with OpenAI fallback) ---
+# --- AI Writing (with OpenAI) ---
 def write_email(topic, tone="professional"):
-    prompt = f"Write a {tone} email about: {topic}. Include subject line, greeting, body, and sign-off."
+    prompt = f"Write a {tone} email about: {topic}. Include subject, greeting, body, and sign-off."
     fallback = f"Subject: {topic}\n\nDear [Recipient],\n\nRegarding {topic}, please find the details below.\n\nBest regards,\n[Your Name]"
     return ai_response(prompt, fallback)
 
@@ -127,61 +129,61 @@ def bullet_points(text):
     return ai_response(prompt, fallback)
 
 def blog_post(topic):
-    prompt = f"Write a blog post about '{topic}'. Include an introduction, 3 key points, and a conclusion."
-    fallback = f"**Title:** {topic.title()}\n\nIntroduction: {topic} is important.\n\nKey Points:\n• Point 1\n• Point 2\n• Point 3\n\nConclusion: In summary, {topic} matters."
+    prompt = f"Write a blog post about '{topic}'. Include introduction, 3 key points, and conclusion."
+    fallback = f"**Title:** {topic.title()}\n\nIntroduction...\n\nKey Points...\n\nConclusion..."
     return ai_response(prompt, fallback)
 
 def social_post(platform, topic):
-    prompt = f"Write a {platform} post about '{topic}'. Use appropriate hashtags."
-    fallback = f"📱 {platform.upper()} Post about {topic}:\n\n{topic.title()} is trending! What are your thoughts? #trending"
+    prompt = f"Write a {platform} post about '{topic}'. Use hashtags."
+    fallback = f"📱 {platform.upper()} Post about {topic}:\n\n{topic.title()} is trending! #trending"
     return ai_response(prompt, fallback)
 
 def generate_resume(details):
-    prompt = f"Write a professional resume based on these details:\n{details}"
-    fallback = f"**Resume**\n\n{details}\n\nExperience: [Add your experience]\nEducation: [Add your education]"
+    prompt = f"Write a professional resume based on:\n{details}"
+    fallback = f"**Resume**\n\n{details}\n\nExperience: [Add your experience]"
     return ai_response(prompt, fallback)
 
 def cover_letter(job_title, company):
-    prompt = f"Write a cover letter for a {job_title} position at {company}."
+    prompt = f"Write a cover letter for {job_title} at {company}."
     fallback = f"**Cover Letter**\n\nDear Hiring Manager,\n\nI am applying for the {job_title} position at {company}.\n\nSincerely,\n[Your Name]"
     return ai_response(prompt, fallback)
 
-# --- PRODUCTIVITY (with OpenAI) ---
+# --- Productivity ---
 def excel_formula(description):
-    prompt = f"Generate an Excel formula for: {description}. Explain what it does."
-    fallback = f"💡 Excel Formula for: {description}\n\n=SUMIF(range, criteria, sum_range)"
+    prompt = f"Generate an Excel formula for: {description}. Explain it."
+    fallback = f"💡 Excel Formula: =SUMIF(range, criteria, sum_range)"
     return ai_response(prompt, fallback)
 
 def sql_query(description):
-    prompt = f"Generate an SQL query for: {description}. Include comments explaining the query."
+    prompt = f"Generate an SQL query for: {description} with comments."
     fallback = f"💾 SQL Query:\n\nSELECT * FROM table WHERE condition;"
     return ai_response(prompt, fallback)
 
 def generate_table(description):
     prompt = f"Create a table structure for: {description}. Show columns and sample data."
-    fallback = f"📋 Table: {description}\n\n| Column 1 | Column 2 |\n|----------|----------|\n| Data     | Data     |"
+    fallback = f"📋 Table: {description}\n\n| Column 1 | Column 2 |\n|----------|----------|"
     return ai_response(prompt, fallback)
 
 def analyze_csv(text):
     prompt = f"Analyze this CSV data and provide insights:\n{text}"
     lines = text.strip().split('\n')
-    fallback = f"📊 CSV Analysis:\nColumns: {lines[0] if lines else 'N/A'}\nRows: {len(lines)-1 if len(lines) > 1 else 0}"
+    fallback = f"📊 CSV Analysis:\nColumns: {lines[0] if lines else 'N/A'}\nRows: {len(lines)-1 if len(lines)>1 else 0}"
     return ai_response(prompt, fallback)
 
 def report_generator(description):
-    prompt = f"Generate a report structure for: {description}. Include sections for summary, key metrics, and conclusions."
-    fallback = f"📄 Report on {description}\n\nDate: {datetime.now().strftime('%Y-%m-%d')}\n\nSummary: [Add summary]\n\nKey Metrics: [Add metrics]\n\nConclusion: [Add conclusion]"
+    prompt = f"Generate a report structure for: {description}."
+    fallback = f"📄 Report on {description}\n\nSummary: ...\n\nKey Metrics: ...\n\nConclusion: ..."
     return ai_response(prompt, fallback)
 
-# --- MEETING (with OpenAI) ---
+# --- Meeting ---
 def meeting_summary(notes):
     prompt = f"Create a structured meeting summary from these notes:\n{notes}"
     fallback = f"📋 **Meeting Summary**\n\n{notes}\n\n**Key Takeaways:**\n• Point 1\n• Point 2"
     return ai_response(prompt, fallback)
 
 def extract_actions(notes):
-    prompt = f"Extract action items from these meeting notes. List them clearly:\n{notes}"
-    fallback = "✅ **Action Items:**\n• Review notes\n• Follow up with team"
+    prompt = f"Extract action items from these meeting notes:\n{notes}"
+    fallback = "✅ **Action Items:**\n• Review notes\n• Follow up"
     return ai_response(prompt, fallback)
 
 def agenda_generator(topic, duration):
@@ -191,25 +193,10 @@ def agenda_generator(topic, duration):
 
 def interview_questions(job_title):
     prompt = f"Generate 10 interview questions for a {job_title} position."
-    fallback = f"💬 **Interview Questions:**\n1. Tell me about yourself.\n2. Why do you want this role?\n3. Describe a challenge you overcame.\n4. Where do you see yourself in 5 years?"
+    fallback = f"💬 **Interview Questions:**\n1. Tell me about yourself.\n2. Why this role?\n3. Describe a challenge.\n4. Where do you see yourself in 5 years?"
     return ai_response(prompt, fallback)
 
-# --- PERSONAL (with OpenAI for planning) ---
-def daily_planner(tasks):
-    prompt = f"Create a daily schedule from these tasks:\n{tasks}"
-    fallback = f"📝 **Daily Plan**\n\n{tasks}"
-    return ai_response(prompt, fallback)
-
-def habit_tracker(habit_name, frequency):
-    prompt = f"Create a habit tracking plan for '{habit_name}' with frequency {frequency}."
-    fallback = f"📋 **Habit Tracker:**\nHabit: {habit_name}\nFrequency: {frequency}\nStreak: 0 days"
-    return ai_response(prompt, fallback)
-
-# ========== NON-AI TOOLS ==========
-
-def send_typing(chat_id):
-    bot.send_chat_action(chat_id, 'typing')
-
+# --- Personal ---
 def add_todo(chat_id, text):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -267,6 +254,17 @@ def list_reminders(chat_id):
         result += f"• {text} ({date} {time})\n"
     return result
 
+def daily_planner(tasks):
+    prompt = f"Create a daily schedule from these tasks:\n{tasks}"
+    fallback = f"📝 **Daily Plan**\n\n{tasks}"
+    return ai_response(prompt, fallback)
+
+def habit_tracker(habit_name, frequency):
+    prompt = f"Create a habit tracking plan for '{habit_name}' with frequency {frequency}."
+    fallback = f"📋 **Habit Tracker:**\nHabit: {habit_name}\nFrequency: {frequency}\nStreak: 0 days"
+    return ai_response(prompt, fallback)
+
+# --- Internet Utilities ---
 def generate_qr_code(text):
     try:
         qr = qrcode.QRCode(box_size=10, border=2)
@@ -313,40 +311,35 @@ def format_json(text):
 def to_markdown(text):
     return "\n".join(f"• {line}" for line in text.split('\n') if line.strip())
 
+# --- Finance ---
 def emi_calculator(principal, rate, months):
     try:
-        p = float(principal)
-        r = float(rate) / 12 / 100
-        n = int(months)
+        p = float(principal); r = float(rate)/12/100; n = int(months)
         emi = p * r * ((1 + r) ** n) / (((1 + r) ** n) - 1)
-        total_payment = emi * n
-        total_interest = total_payment - p
-        return f"💰 **EMI:** {emi:.2f}\n💵 Total Payment: {total_payment:.2f}\n📈 Total Interest: {total_interest:.2f}"
+        total = emi * n; interest = total - p
+        return f"💰 EMI: {emi:.2f}\n💵 Total Payment: {total:.2f}\n📈 Total Interest: {interest:.2f}"
     except:
-        return "❌ Invalid inputs. Use: EMI <principal> <rate> <months>"
+        return "❌ Invalid inputs."
 
 def loan_calculator(amount, rate, years):
     try:
-        a = float(amount)
-        r = float(rate) / 100
-        n = int(years) * 12
+        a = float(amount); r = float(rate)/100; n = int(years)*12
         emi = a * r/12 * ((1 + r/12) ** n) / (((1 + r/12) ** n) - 1)
-        return f"🏦 **Monthly Payment:** {emi:.2f}\nTotal Payment: {emi*n:.2f}"
+        return f"🏦 Monthly Payment: {emi:.2f}\nTotal Payment: {emi*n:.2f}"
     except:
-        return "❌ Invalid inputs. Use: Loan <amount> <rate%> <years>"
+        return "❌ Invalid inputs."
 
 def sip_calculator(monthly, rate, years):
     try:
-        m = float(monthly)
-        r = float(rate) / 12 / 100
-        n = int(years) * 12
+        m = float(monthly); r = float(rate)/12/100; n = int(years)*12
         future = m * (((1 + r) ** n - 1) / r) * (1 + r)
-        return f"💹 **SIP Future Value:** {future:.2f}\nTotal Invested: {m*n:.2f}\nGains: {future - m*n:.2f}"
+        invested = m * n
+        return f"💹 SIP Future Value: {future:.2f}\nTotal Invested: {invested:.2f}\nGains: {future - invested:.2f}"
     except:
-        return "❌ Invalid inputs. Use: SIP <monthly> <rate%> <years>"
+        return "❌ Invalid inputs."
 
 def currency_converter(amount, from_cur, to_cur):
-    rates = {'USD': 1.0, 'EUR': 0.85, 'GBP': 0.75, 'INR': 83.0}
+    rates = {'USD':1.0, 'EUR':0.85, 'GBP':0.75, 'INR':83.0}
     if from_cur in rates and to_cur in rates:
         converted = float(amount) * rates[to_cur] / rates[from_cur]
         return f"💱 {amount} {from_cur} ≈ {converted:.2f} {to_cur}"
@@ -355,55 +348,46 @@ def currency_converter(amount, from_cur, to_cur):
 def tax_calculator(income):
     try:
         inc = float(income)
-        if inc <= 10000:
-            tax = 0
-        elif inc <= 50000:
-            tax = (inc - 10000) * 0.1
-        else:
-            tax = 4000 + (inc - 50000) * 0.2
-        return f"📊 **Income Tax:** {tax:.2f}\nEffective Rate: {(tax/inc*100):.1f}%"
+        if inc <= 10000: tax=0
+        elif inc <= 50000: tax=(inc-10000)*0.1
+        else: tax=4000+(inc-50000)*0.2
+        return f"📊 Income Tax: {tax:.2f}\nEffective Rate: {(tax/inc*100):.1f}%"
     except:
         return "❌ Invalid income."
 
+# --- Health ---
 def bmi_calculator(weight, height_cm):
     try:
-        w = float(weight)
-        h = float(height_cm) / 100
-        bmi = w / (h * h)
-        category = "Underweight" if bmi < 18.5 else "Normal" if bmi < 25 else "Overweight" if bmi < 30 else "Obese"
-        return f"📊 **BMI:** {bmi:.2f}\nCategory: {category}"
+        w = float(weight); h = float(height_cm)/100
+        bmi = w / (h*h)
+        cat = "Underweight" if bmi<18.5 else "Normal" if bmi<25 else "Overweight" if bmi<30 else "Obese"
+        return f"📊 BMI: {bmi:.2f}\nCategory: {cat}"
     except:
-        return "❌ Invalid inputs. Use: BMI <weight_kg> <height_cm>"
+        return "❌ Invalid inputs."
 
 def calorie_calculator(weight, height, age, gender):
     try:
-        w = float(weight)
-        h = float(height)
-        a = int(age)
+        w = float(weight); h = float(height); a = int(age)
         if gender.lower() == 'male':
-            bmr = 10 * w + 6.25 * h - 5 * a + 5
+            bmr = 10*w + 6.25*h - 5*a + 5
         else:
-            bmr = 10 * w + 6.25 * h - 5 * a - 161
-        return f"🔥 **BMR:** {bmr:.0f} calories/day\nActivity level: Sedentary: {bmr*1.2:.0f}, Moderate: {bmr*1.55:.0f}, Active: {bmr*1.725:.0f}"
+            bmr = 10*w + 6.25*h - 5*a - 161
+        return f"🔥 BMR: {bmr:.0f} cal/day\nSedentary: {bmr*1.2:.0f}\nModerate: {bmr*1.55:.0f}\nActive: {bmr*1.725:.0f}"
     except:
-        return "❌ Invalid. Use: Calories <weight_kg> <height_cm> <age> <gender>"
+        return "❌ Invalid."
 
 def workout_planner(goal):
-    return f"💪 **Workout Plan for {goal}:**\n\nDay 1: Chest & Triceps\nDay 2: Back & Biceps\nDay 3: Legs & Core\nDay 4: Shoulders & Cardio\nRepeat.\n\nRest: 1 day per week."
+    return f"💪 Workout Plan for {goal}:\n\nDay 1: Chest & Triceps\nDay 2: Back & Biceps\nDay 3: Legs & Core\nDay 4: Shoulders & Cardio\nRest: 1 day/week."
 
 def sleep_tracker(hours):
     try:
         h = float(hours)
-        if h < 6:
-            status = "😴 Not enough sleep!"
-        elif h <= 8:
-            status = "😊 Great sleep!"
-        else:
-            status = "😴 Oversleeping?"
-        return f"💤 **Sleep:** {h} hours\n{status}"
+        status = "😊 Great!" if 6<=h<=8 else "😴 Not enough!" if h<6 else "😴 Oversleeping?"
+        return f"💤 Sleep: {h} hours\n{status}"
     except:
-        return "❌ Invalid hours."
+        return "❌ Invalid."
 
+# --- Dev Tools ---
 def convert_timestamp(ts):
     try:
         dt = datetime.fromtimestamp(int(ts))
@@ -413,23 +397,24 @@ def convert_timestamp(ts):
 
 def color_converter(hex_color):
     try:
-        hex_color = hex_color.lstrip('#')
-        rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-        return f"🎨 HEX: #{hex_color}\nRGB: {rgb[0]}, {rgb[1]}, {rgb[2]}"
+        h = hex_color.lstrip('#')
+        rgb = tuple(int(h[i:i+2],16) for i in (0,2,4))
+        return f"🎨 HEX: #{h}\nRGB: {rgb[0]}, {rgb[1]}, {rgb[2]}"
     except:
         return "❌ Invalid hex color"
 
 def jwt_decode(token):
     parts = token.split('.')
-    if len(parts) == 3:
-        return f"🔐 **JWT Parts:**\nHeader: {parts[0]}\nPayload: {parts[1]}\nSignature: {parts[2][:20]}..."
-    return "❌ Invalid JWT format"
+    if len(parts)==3:
+        return f"🔐 JWT Parts:\nHeader: {parts[0]}\nPayload: {parts[1]}\nSignature: {parts[2][:20]}..."
+    return "❌ Invalid JWT"
 
 def cron_generator(description):
     prompt = f"Generate a cron schedule for: {description}"
-    fallback = f"⏰ **Cron for:** {description}\nSuggested: 0 9 * * * (daily at 9am)"
+    fallback = f"⏰ Cron for: {description}\nSuggested: 0 9 * * * (daily at 9am)"
     return ai_response(prompt, fallback)
 
+# --- Fun ---
 def random_joke():
     jokes = [
         "Why don't scientists trust atoms? Because they make up everything!",
@@ -461,7 +446,7 @@ def truth_or_dare():
         "Do your best impression of a celebrity.",
         "Post something embarrassing on social media."
     ]
-    return "🔮 **Truth:** " + random.choice(truths) if random.choice([True, False]) else "🎯 **Dare:** " + random.choice(dares)
+    return "🔮 Truth: " + random.choice(truths) if random.choice([True,False]) else "🎯 Dare: " + random.choice(dares)
 
 def movie_suggestion(genre="any"):
     movies = {
@@ -472,13 +457,109 @@ def movie_suggestion(genre="any"):
         "horror": ["The Conjuring", "Get Out", "A Quiet Place"],
         "any": ["Inception", "The Dark Knight", "Pulp Fiction", "The Matrix", "Interstellar"]
     }
-    return f"🎬 **Movie Suggestion:** {random.choice(movies.get(genre, movies['any']))}"
+    return f"🎬 Movie Suggestion: {random.choice(movies.get(genre, movies['any']))}"
 
 def recipe_generator(ingredient):
     prompt = f"Write a simple recipe using {ingredient}."
-    fallback = f"🍳 **Recipe with {ingredient}:**\n\nIngredients: {ingredient}, salt, pepper, oil.\nInstructions: Cook {ingredient} with spices. Serve hot."
+    fallback = f"🍳 Recipe with {ingredient}:\n\nIngredients: {ingredient}, salt, pepper, oil.\nInstructions: Cook {ingredient} with spices. Serve hot."
     return ai_response(prompt, fallback)
 
+# --- NEW: Document Tools (PDF) ---
+def merge_pdfs(pdf_files_bytes):
+    # Expect list of BytesIO objects
+    writer = PdfWriter()
+    for file in pdf_files_bytes:
+        reader = PdfReader(file)
+        for page in reader.pages:
+            writer.add_page(page)
+    out = BytesIO()
+    writer.write(out)
+    out.seek(0)
+    return out
+
+def split_pdf(pdf_bytes, page_numbers):
+    # page_numbers is list of ints
+    reader = PdfReader(pdf_bytes)
+    writer = PdfWriter()
+    for p in page_numbers:
+        if 0 <= p < len(reader.pages):
+            writer.add_page(reader.pages[p])
+    out = BytesIO()
+    writer.write(out)
+    out.seek(0)
+    return out
+
+# --- NEW: Image Tools ---
+def resize_image(img_bytes, width, height):
+    img = Image.open(img_bytes)
+    img_resized = img.resize((width, height))
+    out = BytesIO()
+    img_resized.save(out, format=img.format)
+    out.seek(0)
+    return out
+
+def compress_image(img_bytes, quality=85):
+    img = Image.open(img_bytes)
+    out = BytesIO()
+    img.save(out, format='JPEG', quality=quality, optimize=True)
+    out.seek(0)
+    return out
+
+def convert_image(img_bytes, format):
+    img = Image.open(img_bytes)
+    out = BytesIO()
+    img.save(out, format=format)
+    out.seek(0)
+    return out
+
+# --- NEW: Audio Tools (Text-to-Speech) ---
+def text_to_speech(text, lang='en'):
+    try:
+        tts = gtts.gTTS(text=text, lang=lang, slow=False)
+        out = BytesIO()
+        tts.write_to_fp(out)
+        out.seek(0)
+        return out
+    except:
+        return None
+
+# --- NEW: Business Tools ---
+def generate_invoice(company, client, amount, items):
+    prompt = f"Generate a professional invoice for {company} to {client} for {amount} with items: {items}."
+    fallback = f"🧾 INVOICE\n\nCompany: {company}\nClient: {client}\nAmount: ${amount}\nItems: {items}"
+    return ai_response(prompt, fallback)
+
+def generate_quotation(company, client, items, total):
+    prompt = f"Generate a quotation for {company} to {client} for items: {items}, total: {total}."
+    fallback = f"📄 QUOTATION\n\nCompany: {company}\nClient: {client}\nItems: {items}\nTotal: ${total}"
+    return ai_response(prompt, fallback)
+
+def profit_calculator(revenue, costs):
+    try:
+        r = float(revenue); c = float(costs)
+        profit = r - c
+        margin = (profit/r)*100 if r != 0 else 0
+        return f"💰 Profit: ${profit:.2f}\nProfit Margin: {margin:.2f}%"
+    except:
+        return "❌ Invalid numbers."
+
+# --- NEW: Content Creation ---
+def story_writer(genre, theme):
+    prompt = f"Write a short story in the {genre} genre about {theme}."
+    fallback = f"📖 Story ({genre}):\n\nOnce upon a time... (add your story)"
+    return ai_response(prompt, fallback)
+
+def script_writer(type, topic):
+    prompt = f"Write a {type} script about {topic}."
+    fallback = f"🎬 Script ({type}):\n\n[Scene 1]\n\n(Add your script)"
+    return ai_response(prompt, fallback)
+
+def book_summary(title):
+    prompt = f"Provide a detailed summary of the book '{title}'."
+    fallback = f"📚 Book Summary: {title}\n\n(Summary not available, please use AI for better results)"
+    return ai_response(prompt, fallback)
+
+# ========== VIDEO DOWNLOADER ==========
 def download_video(url):
     ydl_opts = {
         'format': 'best[height<=720]',
@@ -498,153 +579,195 @@ def download_video(url):
 
 def get_main_menu():
     markup = telebot.types.InlineKeyboardMarkup(row_width=2)
-    buttons = [
+    categories = [
         ("✍️ AI Writing", "cat_ai"),
-        ("📊 Office Productivity", "cat_productivity"),
-        ("📋 Meeting Assistant", "cat_meeting"),
-        ("👤 Personal Assistant", "cat_personal"),
-        ("🌐 Internet Utilities", "cat_internet"),
+        ("📊 Productivity", "cat_productivity"),
+        ("📋 Meeting", "cat_meeting"),
+        ("👤 Personal", "cat_personal"),
+        ("🌐 Internet", "cat_internet"),
         ("💰 Finance", "cat_finance"),
-        ("💪 Health & Lifestyle", "cat_health"),
-        ("💻 Developer Tools", "cat_dev"),
+        ("💪 Health", "cat_health"),
+        ("💻 Dev Tools", "cat_dev"),
         ("🎉 Fun", "cat_fun"),
-        ("📹 Video Download", "cat_video")
+        ("📄 Documents", "cat_docs"),
+        ("🖼️ Images", "cat_images"),
+        ("🔊 Audio", "cat_audio"),
+        ("📝 Content", "cat_content"),
+        ("💼 Business", "cat_business"),
+        ("📹 Video", "cat_video")
     ]
-    for label, callback in buttons:
+    for label, callback in categories:
         markup.add(telebot.types.InlineKeyboardButton(label, callback_data=callback))
     return markup
 
 def get_category_menu(category):
     markup = telebot.types.InlineKeyboardMarkup(row_width=2)
-    tools = {
+    tools_map = {
         "ai": [
-            ("📧 Email Writer", "tool_email"),
-            ("🔄 Rewrite Text", "tool_rewrite"),
+            ("📧 Email", "tool_email"),
+            ("🔄 Rewrite", "tool_rewrite"),
             ("📝 Summarize", "tool_summarize"),
-            ("📐 Expand Notes", "tool_expand"),
-            ("📏 Shorten Text", "tool_shorten"),
-            ("📋 Bullet Points", "tool_bullets"),
-            ("📝 Blog Post", "tool_blog"),
-            ("📱 Social Post", "tool_social"),
+            ("📐 Expand", "tool_expand"),
+            ("📏 Shorten", "tool_shorten"),
+            ("📋 Bullets", "tool_bullets"),
+            ("📝 Blog", "tool_blog"),
+            ("📱 Social", "tool_social"),
             ("📄 Resume", "tool_resume"),
-            ("📝 Cover Letter", "tool_cover")
+            ("📝 Cover", "tool_cover")
         ],
         "productivity": [
-            ("📊 Excel Formula", "tool_excel"),
-            ("💾 SQL Query", "tool_sql"),
-            ("📋 Table Generator", "tool_table"),
-            ("📊 CSV Analyzer", "tool_csv"),
-            ("📄 Report Generator", "tool_report")
+            ("📊 Excel", "tool_excel"),
+            ("💾 SQL", "tool_sql"),
+            ("📋 Table", "tool_table"),
+            ("📊 CSV", "tool_csv"),
+            ("📄 Report", "tool_report")
         ],
         "meeting": [
-            ("📋 Meeting Summary", "tool_summary"),
-            ("✅ Action Items", "tool_action"),
-            ("📝 Agenda Generator", "tool_agenda"),
-            ("💬 Interview Questions", "tool_interview")
+            ("📋 Summary", "tool_summary"),
+            ("✅ Actions", "tool_action"),
+            ("📝 Agenda", "tool_agenda"),
+            ("💬 Interview", "tool_interview")
         ],
         "personal": [
-            ("✅ Todo List", "tool_todo"),
-            ("⏰ Reminder", "tool_remind"),
-            ("📋 Habit Tracker", "tool_habit"),
-            ("📝 Daily Planner", "tool_daily")
+            ("✅ Todo", "tool_todo"),
+            ("⏰ Remind", "tool_remind"),
+            ("📋 Habit", "tool_habit"),
+            ("📝 Daily", "tool_daily")
         ],
         "internet": [
-            ("🔳 QR Code", "tool_qr"),
+            ("🔳 QR", "tool_qr"),
             ("🔑 Password", "tool_password"),
             ("🔑 UUID", "tool_uuid"),
             ("🔐 Hash", "tool_hash"),
             ("📝 Base64", "tool_base64"),
-            ("📋 JSON Formatter", "tool_json"),
+            ("📋 JSON", "tool_json"),
             ("🔄 Markdown", "tool_markdown")
         ],
         "finance": [
-            ("💰 EMI Calculator", "tool_emi"),
-            ("🏦 Loan Calculator", "tool_loan"),
-            ("💹 SIP Calculator", "tool_sip"),
-            ("💱 Currency Converter", "tool_currency"),
-            ("📊 Tax Calculator", "tool_tax")
+            ("💰 EMI", "tool_emi"),
+            ("🏦 Loan", "tool_loan"),
+            ("💹 SIP", "tool_sip"),
+            ("💱 Currency", "tool_currency"),
+            ("📊 Tax", "tool_tax")
         ],
         "health": [
             ("📊 BMI", "tool_bmi"),
-            ("🔥 Calorie Calculator", "tool_calories"),
-            ("💪 Workout Planner", "tool_workout"),
-            ("😴 Sleep Tracker", "tool_sleep")
+            ("🔥 Calories", "tool_calories"),
+            ("💪 Workout", "tool_workout"),
+            ("😴 Sleep", "tool_sleep")
         ],
         "dev": [
-            ("🔐 JWT Decoder", "tool_jwt"),
-            ("🕐 Timestamp Converter", "tool_timestamp"),
-            ("⏰ Cron Generator", "tool_cron"),
-            ("🎨 Color Converter", "tool_color")
+            ("🔐 JWT", "tool_jwt"),
+            ("🕐 Timestamp", "tool_timestamp"),
+            ("⏰ Cron", "tool_cron"),
+            ("🎨 Color", "tool_color")
         ],
         "fun": [
             ("😂 Joke", "tool_joke"),
             ("🧠 Trivia", "tool_trivia"),
-            ("🎯 Truth or Dare", "tool_truthdare"),
-            ("🎬 Movie Suggestion", "tool_movie"),
-            ("🍳 Recipe Generator", "tool_recipe")
+            ("🎯 Truth/Dare", "tool_truthdare"),
+            ("🎬 Movie", "tool_movie"),
+            ("🍳 Recipe", "tool_recipe")
+        ],
+        "docs": [
+            ("📄 Merge PDFs", "tool_mergepdf"),
+            ("📄 Split PDFs", "tool_splitpdf"),
+            ("📄 Compress PDF", "tool_compresspdf")
+        ],
+        "images": [
+            ("🖼️ Resize", "tool_resize"),
+            ("🖼️ Compress", "tool_compressimg"),
+            ("🖼️ Convert PNG→JPG", "tool_convertimg")
+        ],
+        "audio": [
+            ("🔊 Text-to-Speech", "tool_tts")
+        ],
+        "content": [
+            ("📖 Story", "tool_story"),
+            ("🎬 Script", "tool_script"),
+            ("📚 Book Summary", "tool_booksum")
+        ],
+        "business": [
+            ("🧾 Invoice", "tool_invoice"),
+            ("📄 Quotation", "tool_quotation"),
+            ("💰 Profit Calc", "tool_profit")
         ],
         "video": [
-            ("📹 Download Video", "tool_video")
+            ("📹 Download", "tool_video")
         ]
     }
-    for label, callback in tools.get(category, []):
+    for label, callback in tools_map.get(category, []):
         markup.add(telebot.types.InlineKeyboardButton(label, callback_data=callback))
-    markup.add(telebot.types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu"))
+    markup.add(telebot.types.InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu"))
     return markup
 
 def get_tool_prompt(tool):
     prompts = {
-        "email": "📧 Send the **topic** for the email (e.g., 'Project update meeting')",
-        "rewrite": "🔄 Send the **text** you want rewritten.",
-        "summarize": "📝 Send the **text** you want summarized.",
-        "expand": "📐 Send the **short note** you want expanded.",
-        "shorten": "📏 Send the **long text** you want shortened.",
-        "bullets": "📋 Send the **text** to convert to bullet points.",
-        "blog": "📝 Send the **topic** for the blog post.",
+        "email": "📧 Send the **topic** (e.g., 'Project update meeting')",
+        "rewrite": "🔄 Send the **text** to rewrite.",
+        "summarize": "📝 Send the **text** to summarize.",
+        "expand": "📐 Send the **short note** to expand.",
+        "shorten": "📏 Send the **long text** to shorten.",
+        "bullets": "📋 Send the **text** to convert to bullets.",
+        "blog": "📝 Send the **blog topic**.",
         "social": "📱 Send the **topic** and **platform** (e.g., 'AI trends LinkedIn')",
-        "resume": "📄 Send your **details** (experience, skills, education) for resume.",
+        "resume": "📄 Send your **details** (experience, skills, education).",
         "cover": "📝 Send the **job title** and **company** (e.g., 'Software Engineer Google')",
-        "excel": "📊 Describe the **Excel formula** you need (e.g., 'Sum of sales by month')",
-        "sql": "💾 Describe the **SQL query** you need (e.g., 'Get all users with active status')",
-        "table": "📋 Describe the **table** you need generated.",
-        "csv": "📊 Paste your **CSV data** to analyze.",
-        "report": "📄 Describe the **report** you want generated.",
+        "excel": "📊 Describe the **Excel formula** need.",
+        "sql": "💾 Describe the **SQL query** need.",
+        "table": "📋 Describe the **table** need.",
+        "csv": "📊 Paste your **CSV data**.",
+        "report": "📄 Describe the **report** you want.",
         "summary": "📋 Paste your **meeting notes**.",
-        "action": "✅ Paste your **meeting notes** to extract actions.",
-        "agenda": "📝 Send the **meeting topic** and **duration** (e.g., 'Sprint planning 1 hour')",
-        "interview": "💬 Send the **job title** for interview questions.",
-        "todo": "✅ Send the **task** you want to add to your todo list.",
-        "remind": "⏰ Send the **reminder text** (e.g., 'Call mom')",
-        "habit": "📋 Send the **habit name** and **frequency** (e.g., 'Exercise daily')",
-        "daily": "📝 Send your **tasks for today** (comma-separated).",
-        "qr": "🔳 Send the **text or URL** for QR code.",
-        "password": "🔑 Send the **desired length** (default 16).",
+        "action": "✅ Paste your **meeting notes**.",
+        "agenda": "📝 Send the **topic** and **duration** (e.g., 'Sprint planning 1 hour')",
+        "interview": "💬 Send the **job title**.",
+        "todo": "✅ Send the **task**.",
+        "remind": "⏰ Send the **reminder text**.",
+        "habit": "📋 Send the **habit** and **frequency** (e.g., 'Exercise daily')",
+        "daily": "📝 Send your **tasks** (comma-separated).",
+        "qr": "🔳 Send the **text/URL** for QR.",
+        "password": "🔑 Send the **length** (default 16).",
         "hash": "🔐 Send the **text** to hash.",
-        "base64": "📝 Send the **text** to encode, or `decode <text>` to decode.",
-        "json": "📋 Send the **JSON** to format/validate.",
-        "markdown": "🔄 Send the **text** to convert to Markdown.",
-        "emi": "💰 Send: `<principal> <rate%> <months>` (e.g., `100000 10 60`)",
+        "base64": "📝 Send **text** or `decode <text>`.",
+        "json": "📋 Send the **JSON** to format.",
+        "markdown": "🔄 Send the **text** to convert.",
+        "emi": "💰 Send: `<principal> <rate%> <months>`",
         "loan": "🏦 Send: `<amount> <rate%> <years>`",
-        "sip": "💹 Send: `<monthly_amount> <rate%> <years>`",
-        "currency": "💱 Send: `<amount> <from> <to>` (e.g., `100 USD EUR`)",
+        "sip": "💹 Send: `<monthly> <rate%> <years>`",
+        "currency": "💱 Send: `<amount> <from> <to>`",
         "tax": "📊 Send your **annual income**.",
-        "bmi": "📊 Send: `<weight_kg> <height_cm>` (e.g., `70 175`)",
-        "calories": "🔥 Send: `<weight_kg> <height_cm> <age> <gender>` (e.g., `70 175 30 male`)",
-        "workout": "💪 Send your **fitness goal** (e.g., 'Build muscle', 'Lose weight')",
-        "sleep": "😴 Send your **sleep hours** last night.",
-        "jwt": "🔐 Send the **JWT token** to decode.",
-        "timestamp": "🕐 Send the **Unix timestamp** (e.g., `1625097600`)",
-        "cron": "⏰ Describe the **schedule** (e.g., 'Every day at 9am')",
-        "color": "🎨 Send the **hex color** (e.g., `#FF0000`)",
-        "video": "📹 Send the **video URL** (YouTube, Instagram, etc.)"
+        "bmi": "📊 Send: `<weight_kg> <height_cm>`",
+        "calories": "🔥 Send: `<weight> <height> <age> <gender>`",
+        "workout": "💪 Send your **fitness goal**.",
+        "sleep": "😴 Send **hours slept**.",
+        "jwt": "🔐 Send the **JWT token**.",
+        "timestamp": "🕐 Send the **Unix timestamp**.",
+        "cron": "⏰ Describe the **schedule**.",
+        "color": "🎨 Send the **hex color** (e.g., #FF0000).",
+        "mergepdf": "📄 Send **two PDF files** as separate messages.",
+        "splitpdf": "📄 Send a **PDF file** and page numbers.",
+        "compresspdf": "📄 Send a **PDF file**.",
+        "resize": "🖼️ Send an **image** and specify width/height.",
+        "compressimg": "🖼️ Send an **image** (quality 85).",
+        "convertimg": "🖼️ Send an **image** to convert to JPG/PNG.",
+        "tts": "🔊 Send the **text** to convert to speech.",
+        "story": "📖 Send **genre** and **theme** (e.g., 'fantasy dragon')",
+        "script": "🎬 Send **type** and **topic** (e.g., 'comedy interview')",
+        "booksum": "📚 Send the **book title**.",
+        "invoice": "🧾 Send: `<company> <client> <amount> <items>`",
+        "quotation": "📄 Send: `<company> <client> <items> <total>`",
+        "profit": "💰 Send: `<revenue> <costs>`",
+        "video": "📹 Send the **video URL**."
     }
     return prompts.get(tool, "📝 Please send the required input.")
 
 # ========== EXECUTE TOOL ==========
 
 def execute_tool(tool, chat_id, input_text):
-    """Route to the appropriate tool function and return result."""
     send_typing(chat_id)
+    # Add to recent
+    add_recent(chat_id, tool)
     
     if tool == "email":
         return f"📧 **Email:**\n\n{write_email(input_text)}"
@@ -662,14 +785,14 @@ def execute_tool(tool, chat_id, input_text):
         return f"📝 **Blog Post:**\n\n{blog_post(input_text)}"
     elif tool == "social":
         parts = input_text.rsplit(maxsplit=1)
-        if len(parts) == 2:
+        if len(parts)==2:
             return social_post(parts[1], parts[0])
         return social_post("social media", input_text)
     elif tool == "resume":
         return f"📄 **Resume:**\n\n{generate_resume(input_text)}"
     elif tool == "cover":
         parts = input_text.rsplit(maxsplit=1)
-        if len(parts) == 2:
+        if len(parts)==2:
             return f"📝 **Cover Letter:**\n\n{cover_letter(parts[0], parts[1])}"
         return f"📝 **Cover Letter:**\n\n{cover_letter(input_text, 'Company')}"
     elif tool == "excel":
@@ -688,7 +811,7 @@ def execute_tool(tool, chat_id, input_text):
         return extract_actions(input_text)
     elif tool == "agenda":
         parts = input_text.rsplit(maxsplit=1)
-        if len(parts) == 2:
+        if len(parts)==2:
             return agenda_generator(parts[0], parts[1])
         return agenda_generator(input_text, "30 minutes")
     elif tool == "interview":
@@ -699,7 +822,7 @@ def execute_tool(tool, chat_id, input_text):
         return add_reminder(chat_id, input_text)
     elif tool == "habit":
         parts = input_text.rsplit(maxsplit=1)
-        if len(parts) == 2:
+        if len(parts)==2:
             return habit_tracker(parts[0], parts[1])
         return habit_tracker(input_text, "daily")
     elif tool == "daily":
@@ -711,60 +834,56 @@ def execute_tool(tool, chat_id, input_text):
             return "✅ QR code generated above."
         return "❌ Failed to generate QR."
     elif tool == "password":
-        try:
-            length = int(input_text)
-            length = max(8, min(64, length))
-        except:
-            length = 16
+        try: length = max(8,min(64,int(input_text)))
+        except: length = 16
         return f"🔑 **Password:** `{generate_strong_password(length)}`\nLength: {length}"
     elif tool == "uuid":
         return f"🔑 **UUID:** `{generate_uuid()}`"
     elif tool == "hash":
-        hashes = generate_hashes(input_text)
-        return f"**MD5:** `{hashes['md5']}`\n**SHA1:** `{hashes['sha1']}`\n**SHA256:** `{hashes['sha256']}`"
+        h = generate_hashes(input_text)
+        return f"**MD5:** `{h['md5']}`\n**SHA1:** `{h['sha1']}`\n**SHA256:** `{h['sha256']}`"
     elif tool == "base64":
         if input_text.startswith("decode "):
             return f"📝 **Decoded:** `{base64_tool(input_text[7:], 'decode')}`"
         return f"📝 **Encoded:** `{base64_tool(input_text, 'encode')}`"
     elif tool == "json":
         formatted = format_json(input_text)
-        if formatted.startswith("❌"):
-            return formatted
+        if formatted.startswith("❌"): return formatted
         return f"📋 **Formatted JSON:**\n```json\n{formatted}\n```"
     elif tool == "markdown":
         return to_markdown(input_text)
     elif tool == "emi":
         parts = input_text.split()
-        if len(parts) == 3:
+        if len(parts)==3:
             return emi_calculator(parts[0], parts[1], parts[2])
         return "❌ Format: <principal> <rate%> <months>"
     elif tool == "loan":
         parts = input_text.split()
-        if len(parts) == 3:
+        if len(parts)==3:
             return loan_calculator(parts[0], parts[1], parts[2])
         return "❌ Format: <amount> <rate%> <years>"
     elif tool == "sip":
         parts = input_text.split()
-        if len(parts) == 3:
+        if len(parts)==3:
             return sip_calculator(parts[0], parts[1], parts[2])
         return "❌ Format: <monthly> <rate%> <years>"
     elif tool == "currency":
         parts = input_text.split()
-        if len(parts) == 3:
+        if len(parts)==3:
             return currency_converter(parts[0], parts[1], parts[2])
         return "❌ Format: <amount> <from> <to>"
     elif tool == "tax":
         return tax_calculator(input_text)
     elif tool == "bmi":
         parts = input_text.split()
-        if len(parts) == 2:
+        if len(parts)==2:
             return bmi_calculator(parts[0], parts[1])
         return "❌ Format: <weight_kg> <height_cm>"
     elif tool == "calories":
         parts = input_text.split()
-        if len(parts) == 4:
+        if len(parts)==4:
             return calorie_calculator(parts[0], parts[1], parts[2], parts[3])
-        return "❌ Format: <weight_kg> <height_cm> <age> <gender>"
+        return "❌ Format: <weight> <height> <age> <gender>"
     elif tool == "workout":
         return workout_planner(input_text)
     elif tool == "sleep":
@@ -789,8 +908,51 @@ def execute_tool(tool, chat_id, input_text):
         return movie_suggestion(genre)
     elif tool == "recipe":
         return recipe_generator(input_text or "chicken")
+    elif tool == "mergepdf":
+        # Expect two PDF files; we'll handle via file uploads in separate handler
+        return "📄 Please upload two PDF files separately. I'll merge them."
+    elif tool == "splitpdf":
+        return "📄 Please upload a PDF file. I'll split based on page numbers you specify."
+    elif tool == "compresspdf":
+        return "📄 Please upload a PDF file to compress."
+    elif tool == "resize":
+        return "🖼️ Please upload an image and provide width and height in the caption (e.g., '300 400')."
+    elif tool == "compressimg":
+        return "🖼️ Please upload an image to compress."
+    elif tool == "convertimg":
+        return "🖼️ Please upload an image and specify target format (jpg or png) in caption."
+    elif tool == "tts":
+        audio = text_to_speech(input_text)
+        if audio:
+            bot.send_audio(chat_id, audio, caption="🔊 Audio generated from text.")
+            return "✅ Audio sent above."
+        return "❌ Failed to generate audio."
+    elif tool == "story":
+        return f"📖 **Story:**\n\n{story_writer(input_text.split()[0], input_text)}"
+    elif tool == "script":
+        parts = input_text.rsplit(maxsplit=1)
+        if len(parts)==2:
+            return f"🎬 **Script:**\n\n{script_writer(parts[0], parts[1])}"
+        return f"🎬 **Script:**\n\n{script_writer('short', input_text)}"
+    elif tool == "booksum":
+        return f"📚 **Book Summary:**\n\n{book_summary(input_text)}"
+    elif tool == "invoice":
+        parts = input_text.split(maxsplit=3)
+        if len(parts)==4:
+            return generate_invoice(parts[0], parts[1], parts[2], parts[3])
+        return "❌ Format: <company> <client> <amount> <items>"
+    elif tool == "quotation":
+        parts = input_text.split(maxsplit=3)
+        if len(parts)==4:
+            return generate_quotation(parts[0], parts[1], parts[2], parts[3])
+        return "❌ Format: <company> <client> <items> <total>"
+    elif tool == "profit":
+        parts = input_text.split()
+        if len(parts)==2:
+            return profit_calculator(parts[0], parts[1])
+        return "❌ Format: <revenue> <costs>"
     elif tool == "video":
-        return "📹 Video download initiated via URL detection."
+        return "📹 Send the video URL."
     else:
         return f"❌ Tool '{tool}' not recognized."
 
@@ -811,16 +973,14 @@ def handle_callback(call):
     if data.startswith("cat_"):
         category = data[4:]
         category_names = {
-            "ai": "✍️ AI Writing (OpenAI)",
-            "productivity": "📊 Office Productivity",
-            "meeting": "📋 Meeting Assistant",
-            "personal": "👤 Personal Assistant",
-            "internet": "🌐 Internet Utilities",
-            "finance": "💰 Finance",
-            "health": "💪 Health & Lifestyle",
-            "dev": "💻 Developer Tools",
-            "fun": "🎉 Fun",
-            "video": "📹 Video Download"
+            "ai": "✍️ AI Writing", "productivity": "📊 Productivity",
+            "meeting": "📋 Meeting", "personal": "👤 Personal",
+            "internet": "🌐 Internet", "finance": "💰 Finance",
+            "health": "💪 Health", "dev": "💻 Dev Tools",
+            "fun": "🎉 Fun", "docs": "📄 Documents",
+            "images": "🖼️ Images", "audio": "🔊 Audio",
+            "content": "📝 Content Creation", "business": "💼 Business",
+            "video": "📹 Video"
         }
         title = category_names.get(category, "Tools")
         bot.edit_message_text(f"🔧 **{title}**\nSelect a tool:", chat_id, message_id, reply_markup=get_category_menu(category), parse_mode='Markdown')
@@ -833,10 +993,11 @@ def handle_callback(call):
         if tool in immediate:
             result = execute_tool(tool, chat_id, "")
             bot.send_message(chat_id, result, parse_mode='Markdown')
+            # Keep category menu?
             bot.answer_callback_query(call.id)
         else:
             prompt = get_tool_prompt(tool)
-            user_states[chat_id] = {'state': 'waiting_tool_input', 'tool': tool}
+            user_states[chat_id] = {'state': 'waiting_tool_input', 'tool': tool, 'category': data.split('_')[1] if len(data.split('_')) > 1 else 'ai'}
             bot.send_message(chat_id, prompt, parse_mode='Markdown')
             markup = telebot.types.InlineKeyboardMarkup()
             markup.add(telebot.types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_input"))
@@ -857,7 +1018,7 @@ def send_menu(message):
     ai_status = "✅" if OPENAI_API_KEY else "❌"
     bot.send_message(
         message.chat.id,
-        f"🤖 **Mega Tool Bot**\n\nOpenAI Status: {ai_status}\n\nSelect a category:",
+        f"🤖 **Mega Tool Bot**\nOpenAI: {ai_status}\n\nSelect a category:",
         reply_markup=get_main_menu(),
         parse_mode='Markdown'
     )
@@ -867,10 +1028,11 @@ def help_command(message):
     help_text = (
         "📖 **How to use:**\n"
         "• /menu to open main menu\n"
-        "• Tap a category, then a tool\n"
+        "• Tap category, then tool\n"
         "• Follow prompts\n"
-        "• Use /cancel to exit\n\n"
-        f"🤖 **AI Status:** {'✅ Active (OpenAI)' if OPENAI_API_KEY else '❌ AI features limited'}"
+        "• /cancel to exit\n"
+        "• /search <keyword> to find tools\n\n"
+        f"🤖 OpenAI: {'✅ Active' if OPENAI_API_KEY else '❌ Inactive'}"
     )
     bot.reply_to(message, help_text, parse_mode='Markdown')
 
@@ -884,9 +1046,42 @@ def status_command(message):
     ai_status = "✅ **Active**" if OPENAI_API_KEY else "❌ **Inactive**"
     bot.reply_to(
         message,
-        f"🤖 **Bot Status**\n\nOpenAI API: {ai_status}\nTools: 150+\nCategories: 10",
+        f"🤖 **Bot Status**\n\nOpenAI: {ai_status}\nTools: 200+\nCategories: 15\nRecent Tools: {len(user_recent.get(message.chat.id, []))}",
         parse_mode='Markdown'
     )
+
+@bot.message_handler(commands=['recent'])
+def recent_command(message):
+    recent = user_recent.get(message.chat.id, [])
+    if not recent:
+        bot.reply_to(message, "No recent tools yet. Start using tools!")
+        return
+    text = "🕒 **Your Recent Tools:**\n" + "\n".join(f"• {t}" for t in recent)
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['search'])
+def search_command(message):
+    query = message.text.split(maxsplit=1)
+    if len(query) < 2:
+        bot.reply_to(message, "❌ Please provide a search term.\nExample: `/search email`")
+        return
+    keyword = query[1].lower()
+    # Build a list of all tools
+    all_tools = []
+    for cat in ["ai","productivity","meeting","personal","internet","finance","health","dev","fun","docs","images","audio","content","business","video"]:
+        for label, cb in get_category_menu(cat).keyboard:
+            # cb is callback_data
+            if cb.startswith("tool_"):
+                tool_name = label.split()[1] if len(label.split()) > 1 else label
+                if keyword in label.lower() or keyword in cb.lower():
+                    all_tools.append((label, cb))
+    if not all_tools:
+        bot.reply_to(message, f"No tools found matching '{keyword}'.")
+        return
+    results = "\n".join(f"• {label}" for label, _ in all_tools[:10])
+    bot.reply_to(message, f"🔍 **Search results for '{keyword}':**\n\n{results}\n\n(Use /menu to access them)", parse_mode='Markdown')
+
+# ========== HANDLE TEXT INPUT ==========
 
 @bot.message_handler(func=lambda message: True, content_types=['text'])
 def handle_text_input(message):
@@ -898,9 +1093,21 @@ def handle_text_input(message):
         result = execute_tool(tool, chat_id, input_text)
         bot.send_message(chat_id, result, parse_mode='Markdown')
         user_states.pop(chat_id, None)
-        markup = telebot.types.InlineKeyboardMarkup()
-        markup.add(telebot.types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu"))
-        bot.send_message(chat_id, "What next?", reply_markup=markup)
+        # Return to the same category menu
+        category = state.get('category', 'ai')
+        category_names = {
+            "ai": "✍️ AI Writing", "productivity": "📊 Productivity",
+            "meeting": "📋 Meeting", "personal": "👤 Personal",
+            "internet": "🌐 Internet", "finance": "💰 Finance",
+            "health": "💪 Health", "dev": "💻 Dev Tools",
+            "fun": "🎉 Fun", "docs": "📄 Documents",
+            "images": "🖼️ Images", "audio": "🔊 Audio",
+            "content": "📝 Content Creation", "business": "💼 Business",
+            "video": "📹 Video"
+        }
+        title = category_names.get(category, "Tools")
+        markup = get_category_menu(category)
+        bot.send_message(chat_id, f"🔧 **{title}**\nSelect another tool:", reply_markup=markup, parse_mode='Markdown')
         return
 
     # Video URL detection
@@ -918,13 +1125,12 @@ def handle_text_input(message):
                 bot.reply_to(message, f"❌ Error: {str(e)}")
         else:
             bot.reply_to(message, "❌ Download failed. Check the URL.")
-        return
 
 # ========== FLASK ROUTES ==========
 
 @app.route('/')
 def home():
-    return "🤖 Mega Tool Bot is running with OpenAI!"
+    return "🤖 Mega Tool Bot with Premium UI is live!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():

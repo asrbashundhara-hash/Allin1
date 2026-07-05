@@ -2,12 +2,12 @@ import os
 import re
 import threading
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta  # ✅ Fixed: Proper import
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ========== FLASK WEB SERVER (keeps Render alive) ==========
+# ========== FLASK WEB SERVER ==========
 app = Flask(__name__)
 
 @app.route('/')
@@ -34,7 +34,6 @@ def calculate_age(birth_date_str):
         
         if days < 0:
             months -= 1
-            # Get days in previous month
             prev_month = today.replace(day=1) - timedelta(days=1)
             days += prev_month.day
         if months < 0:
@@ -45,7 +44,7 @@ def calculate_age(birth_date_str):
     except ValueError:
         return None
 
-# --- Video Downloader (yt-dlp) ---
+# --- Video Downloader ---
 async def download_video(url):
     import yt_dlp
     
@@ -62,6 +61,7 @@ async def download_video(url):
             filename = ydl.prepare_filename(info)
             return filename
     except Exception as e:
+        print(f"Download error: {e}")
         return None
 
 # --- Command Handlers ---
@@ -91,28 +91,24 @@ async def handle_age_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if result:
         await update.message.reply_text(result, parse_mode="Markdown")
+        context.user_data['waiting_for_age'] = False
     else:
         await update.message.reply_text(
             "❌ Invalid format! Please use:\n`YYYY-MM-DD`\n\nExample: `2000-01-15`",
             parse_mode="Markdown"
         )
-        return  # Keep waiting for correct input
-    
-    context.user_data['waiting_for_age'] = False
 
 async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('waiting_for_age'):
-        return  # User is in age-calculator mode
+        return
     
     url = update.message.text.strip()
     
-    # Check if it looks like a URL
     if not re.match(r'https?://[^\s]+', url):
         return
     
     await update.message.reply_text("⏳ Downloading video... Please wait.")
     
-    # Create downloads folder
     os.makedirs('downloads', exist_ok=True)
     
     filename = await download_video(url)
@@ -141,16 +137,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
-# --- Error Handler ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"Error: {context.error}")
 
 # --- Build the Bot ---
 def run_bot():
-    # Create application
     application = Application.builder().token(TOKEN).build()
     
-    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("age", age_command))
@@ -158,15 +151,11 @@ def run_bot():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video_url))
     application.add_error_handler(error_handler)
     
-    # Run with polling (simpler for Render)
     print("🤖 Bot started! Using polling mode.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 # ========== MAIN ENTRY ==========
 if __name__ == "__main__":
-    import timedelta
-    from datetime import timedelta
-    
     # Start Flask in a separate thread
     port = int(os.environ.get("PORT", 5000))
     flask_thread = threading.Thread(
@@ -176,5 +165,5 @@ if __name__ == "__main__":
     flask_thread.start()
     print(f"🌐 Flask server running on port {port}")
     
-    # Run the bot (this blocks)
+    # Run the bot
     run_bot()

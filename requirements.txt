@@ -2,6 +2,6 @@ Flask==3.0.0
 pyTelegramBotAPI==4.22.0
 yt-dlp==2024.11.4
 qrcode==7.4.2
-Pillow==10.3.0
+Pillow>=12.0.0
 requests==2.34.2
 gTTS==2.3.2

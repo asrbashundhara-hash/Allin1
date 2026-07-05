@@ -1,29 +1,23 @@
 import os
 import re
-import threading
 import asyncio
-from datetime import datetime, timedelta  # ✅ Fixed: Proper import
-from flask import Flask
+from datetime import datetime, timedelta  # ✅ Correct import - NO "import timedelta" line
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ========== FLASK WEB SERVER ==========
+# ========== FLASK APP ==========
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "Bot is running!"
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-# ========== TELEGRAM BOT ==========
+# ========== BOT SETUP ==========
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
 
-# --- Age Calculator ---
+# Build the bot application
+application = Application.builder().token(TOKEN).build()
+
+# ========== TOOL FUNCTIONS ==========
 def calculate_age(birth_date_str):
     try:
         birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d")
@@ -44,17 +38,14 @@ def calculate_age(birth_date_str):
     except ValueError:
         return None
 
-# --- Video Downloader ---
 async def download_video(url):
     import yt_dlp
-    
     ydl_opts = {
         'format': 'best[height<=720]',
         'outtmpl': 'downloads/%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
     }
-    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -64,7 +55,7 @@ async def download_video(url):
         print(f"Download error: {e}")
         return None
 
-# --- Command Handlers ---
+# ========== COMMAND HANDLERS ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (
         "🤖 **Welcome to Multi-Tool Bot!**\n\n"
@@ -85,34 +76,28 @@ async def age_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_age_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('waiting_for_age'):
         return
-    
     user_input = update.message.text.strip()
     result = calculate_age(user_input)
-    
     if result:
         await update.message.reply_text(result, parse_mode="Markdown")
         context.user_data['waiting_for_age'] = False
     else:
         await update.message.reply_text(
-            "❌ Invalid format! Please use:\n`YYYY-MM-DD`\n\nExample: `2000-01-15`",
+            "❌ Invalid format! Please use:\n`YYYY-MM-DD`",
             parse_mode="Markdown"
         )
 
 async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('waiting_for_age'):
         return
-    
     url = update.message.text.strip()
-    
     if not re.match(r'https?://[^\s]+', url):
         return
     
     await update.message.reply_text("⏳ Downloading video... Please wait.")
-    
     os.makedirs('downloads', exist_ok=True)
     
     filename = await download_video(url)
-    
     if filename and os.path.exists(filename):
         try:
             with open(filename, 'rb') as f:
@@ -121,10 +106,7 @@ async def handle_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"❌ Error sending video: {str(e)}")
     else:
-        await update.message.reply_text(
-            "❌ Could not download video. Make sure the link is valid.\n\n"
-            "Supported: YouTube, Instagram, TikTok, Twitter, Vimeo, and more."
-        )
+        await update.message.reply_text("❌ Could not download video. Make sure the link is valid.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
@@ -132,38 +114,64 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - Show welcome message\n"
         "/age - Calculate your exact age\n"
         "/help - Show this help\n\n"
-        "📹 **Video Downloader:**\n"
-        "Just paste any video URL (YouTube, Instagram, TikTok, etc.)"
+        "📹 **Video Downloader:**\nJust paste any video URL."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"Error: {context.error}")
 
-# --- Build the Bot ---
-def run_bot():
-    application = Application.builder().token(TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("age", age_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_age_input))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video_url))
-    application.add_error_handler(error_handler)
-    
-    print("🤖 Bot started! Using polling mode.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+# Register all handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_command))
+application.add_handler(CommandHandler("age", age_command))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_age_input))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video_url))
+application.add_error_handler(error_handler)
 
-# ========== MAIN ENTRY ==========
-if __name__ == "__main__":
-    # Start Flask in a separate thread
-    port = int(os.environ.get("PORT", 5000))
-    flask_thread = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-    )
-    flask_thread.daemon = True
-    flask_thread.start()
-    print(f"🌐 Flask server running on port {port}")
+# ========== FLASK ROUTES ==========
+@app.route('/')
+def home():
+    return "🤖 Bot is running! Webhook is ready."
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Handle incoming Telegram messages via Webhook."""
+    try:
+        json_data = request.get_json(force=True)
+        update = Update.de_json(json_data, application.bot)
+        asyncio.run(application.process_update(update))
+    except Exception as e:
+        print(f"Webhook error: {e}")
+    return "OK", 200
+
+@app.route('/set_webhook')
+def set_webhook():
+    """Manually set the webhook URL."""
+    render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+    if not render_host:
+        return "❌ RENDER_EXTERNAL_HOSTNAME not found. Make sure you are on Render.", 500
     
-    # Run the bot
-    run_bot()
+    webhook_url = f"https://{render_host}/webhook"
+    try:
+        asyncio.run(application.bot.set_webhook(webhook_url))
+        return f"✅ Webhook set successfully to: {webhook_url}"
+    except Exception as e:
+        return f"❌ Failed to set webhook: {e}", 500
+
+# ========== START SERVER ==========
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    
+    # Auto-set webhook on Render
+    if os.environ.get('RENDER_EXTERNAL_HOSTNAME'):
+        render_host = os.environ['RENDER_EXTERNAL_HOSTNAME']
+        webhook_url = f"https://{render_host}/webhook"
+        try:
+            asyncio.run(application.bot.set_webhook(webhook_url))
+            print(f"✅ Webhook auto-set to: {webhook_url}")
+        except Exception as e:
+            print(f"❌ Could not auto-set webhook: {e}")
+    
+    print(f"🌐 Flask server starting on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)

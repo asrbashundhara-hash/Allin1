@@ -12,10 +12,10 @@ uvicorn==0.34.0
 # AI / LLM / NLP (OpenAI, Hugging Face, PyTorch)
 # ================================================
 openai==1.52.0
-tiktoken==0.12.0              # ✅ Python 3.14 compatible
+tiktoken==0.12.0
 transformers==4.46.3
-torch==2.10.0                 # ✅ Python 3.14 compatible (official wheels)
-torchvision==0.20.0
+torch==2.10.0
+torchvision==0.25.0              # ✅ Fixed: Compatible with torch 2.10.0 and Python 3.14[reference:3][reference:4]
 sentence-transformers==3.4.1
 langchain==0.3.7
 chromadb==0.5.23
@@ -24,7 +24,7 @@ chromadb==0.5.23
 # DATA SCIENCE & MATH
 # ================================================
 pandas==2.2.2
-numpy==2.2.4                  # ✅ Python 3.14 compatible
+numpy==2.2.4
 scipy==1.14.1
 scikit-learn==1.6.0
 statsmodels==0.14.4
@@ -55,8 +55,8 @@ aioredis==2.0.1
 # ================================================
 # IMAGE, VIDEO & MEDIA
 # ================================================
-Pillow==12.0.0                # ✅ Python 3.14 compatible
-opencv-python==4.10.0.84      # ✅ Python 3.14 compatible
+Pillow==12.0.0
+opencv-python==4.10.0.84
 moviepy==2.0.0
 scikit-image==0.24.0
 imageio==2.36.0
@@ -112,7 +112,7 @@ cryptography==43.0.3
 geopy==2.4.1
 
 # ================================================
-# DEVELOPMENT & TESTING (Optional – keep if you like)
+# DEVELOPMENT & TESTING (Optional)
 # ================================================
 pytest==8.3.4
 pytest-cov==6.0.0
